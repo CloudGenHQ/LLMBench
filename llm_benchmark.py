@@ -4,7 +4,8 @@ LLM Endpoint Benchmark Tool
 ============================
 
 A cross-platform (Windows / Linux) GUI tool for benchmarking LLM inference
-endpoints such as **vLLM** (OpenAI-compatible) and **Ollama**.
+endpoints such as **Ollama** and OpenAI-compatible servers (**vLLM**,
+**SGLang**, **llama.cpp**, **LM Studio**, **LocalAI**, **TensorRT-LLM**).
 
 Features
 --------
@@ -100,6 +101,51 @@ DEFAULT_CONTEXT_SIZE = 8192
 CONSISTENCY_PROMPT = "What is the capital of France?"
 CONSISTENCY_MAX_TOKENS = 20
 CONSISTENCY_RUNS = 10
+
+# -- Endpoint types offered in the GUI (display label, protocol family) --
+#   "openai" -> OpenAI-compatible HTTP API  (/v1/chat/completions, /v1/models)
+#   "ollama" -> Ollama native API           (/api/generate, /api/tags)
+#
+# Most modern local servers (vLLM, SGLang, llama.cpp, LM Studio, LocalAI,
+# TensorRT-LLM) speak the OpenAI protocol and therefore share one code path;
+# each is listed explicitly so the user picks the exact server they run.
+ENDPOINT_TYPES: List[Tuple[str, str]] = [
+    ("Ollama", "ollama"),
+    ("vLLM", "openai"),
+    ("SGLang", "openai"),
+    ("llama.cpp", "openai"),
+    ("LM Studio", "openai"),
+    ("LocalAI", "openai"),
+    ("TensorRT-LLM", "openai"),
+]
+
+# Sensible default base URL per endpoint type (applied when the type changes).
+ENDPOINT_DEFAULT_URLS: Dict[str, str] = {
+    "Ollama": "http://localhost:11434",
+    "vLLM": "http://localhost:8000",
+    "SGLang": "http://localhost:30000",
+    "llama.cpp": "http://localhost:8080",
+    "LM Studio": "http://localhost:1234",
+    "LocalAI": "http://localhost:8080",
+    "TensorRT-LLM": "http://localhost:8000",
+}
+
+# Older settings files stored the protocol name ("vllm" / "ollama") instead of
+# a specific type label. Map those to a concrete label when loading.
+_LEGACY_TYPE_MAP: Dict[str, str] = {"vllm": "vLLM", "ollama": "Ollama"}
+
+
+def endpoint_protocol(label: str) -> str:
+    """Return the protocol family (``"openai"`` | ``"ollama"``) for a type label.
+
+    Legacy protocol names are resolved correctly; anything unrecognised falls
+    back to the OpenAI-compatible protocol (the most common case).
+    """
+    label = _LEGACY_TYPE_MAP.get(label, label)
+    for name, proto in ENDPOINT_TYPES:
+        if name == label:
+            return proto
+    return "openai"
 
 
 # ══════════════════════════════════════════════
@@ -438,7 +484,8 @@ class BenchmarkEngine:
                  progress_cb: Optional[Callable] = None,
                  api_key: str = "",
                  context_size: int = 8192):
-        self.et = endpoint_type
+        self.endpoint_type = endpoint_type  # specific label, e.g. "SGLang"
+        self.protocol = endpoint_protocol(endpoint_type)  # "openai" | "ollama"
         self.host = host
         self.port = port
         self.model = model
@@ -450,7 +497,7 @@ class BenchmarkEngine:
         self.results: List[TestResult] = []
 
     def _stream(self, prompt: str, max_tokens: int):
-        if self.et == "vllm":
+        if self.protocol == "openai":
             msgs = [{"role": "user", "content": prompt}]
             return _stream_vllm(self.host, self.port, self.model,
                                 msgs, max_tokens, self.https, self.skip_ssl,
@@ -459,7 +506,7 @@ class BenchmarkEngine:
                               prompt, max_tokens, self.https, self.skip_ssl)
 
     def _token_count(self, meta: Dict) -> int:
-        if self.et == "ollama":
+        if self.protocol == "ollama":
             return meta.get("eval_count", 0)
         usage = meta.get("usage", {})
         return usage.get("completion_tokens", 0)
@@ -550,6 +597,7 @@ class BenchmarkEngine:
                  max(512, max_ctx // 2), max_ctx]
         ttft_vals: List[float] = []
         total_vals: List[float] = []
+        tps_vals: List[float] = []
         for si, size in enumerate(sizes):
             self._progress(si + 1, len(sizes), f"Context {size} tokens")
             # Each 27-char filler group is ~7 tokens; leave headroom for
@@ -561,6 +609,7 @@ class BenchmarkEngine:
             r = self._run_single(prompt, 32)
             ttft_vals.append(r["ttft"])
             total_vals.append(r["total"])
+            tps_vals.append(r["tps"])
         tr1 = TestResult("Context Scaling", "TTFT vs Context", "s",
                          ttft_vals)
         tr1.compute_stats()
@@ -571,6 +620,11 @@ class BenchmarkEngine:
         tr2.compute_stats()
         tr2.name = f"Context Latency ({', '.join(map(str, sizes))})"
         self.results.append(tr2)
+        tr3 = TestResult("Context Scaling", "Throughput vs Context", "tok/s",
+                         tps_vals)
+        tr3.compute_stats()
+        tr3.name = f"Context Throughput ({', '.join(map(str, sizes))})"
+        self.results.append(tr3)
 
     def test_consistency(self) -> None:
         n = CONSISTENCY_RUNS
@@ -599,7 +653,7 @@ class BenchmarkEngine:
         self.test_consistency()
         self._progress(1, 1, "Done")
         return BenchmarkReport(
-            endpoint_type=self.et,
+            endpoint_type=self.endpoint_type,
             endpoint_url=(f"{'https' if self.https else 'http'}://"
                           f"{self.host}:{self.port}"),
             model=self.model,
@@ -636,13 +690,13 @@ class App:
         top.pack(fill="x", **pad)
 
         ttk.Label(top, text="Type:").grid(row=0, column=0, sticky="w")
-        self.var_type = tk.StringVar(value="ollama")
-        ttk.Radiobutton(top, text="Ollama", value="ollama",
-                        variable=self.var_type,
-                        command=self._on_type_change).grid(row=0, column=1)
-        ttk.Radiobutton(top, text="vLLM", value="vllm",
-                        variable=self.var_type,
-                        command=self._on_type_change).grid(row=0, column=2)
+        self.var_type = tk.StringVar(value="Ollama")
+        self.cmb_type = ttk.Combobox(
+            top, textvariable=self.var_type, width=16, state="readonly",
+            values=[label for label, _ in ENDPOINT_TYPES])
+        self.cmb_type.grid(row=0, column=1, columnspan=2, sticky="we")
+        self.cmb_type.bind("<<ComboboxSelected>>",
+                           lambda _e: self._on_type_change())
 
         ttk.Label(top, text="URL:").grid(row=1, column=0, sticky="w")
         self.var_url = tk.StringVar(value="http://localhost:11434")
@@ -740,8 +794,10 @@ class App:
         self.var_url.trace_add("write", self._on_url_changed)
 
     def _on_type_change(self) -> None:
-        if self.var_type.get() == "vllm":
-            self.var_url.set("http://localhost:8000")
+        label = self.var_type.get()
+        if endpoint_protocol(label) == "openai":
+            self.var_url.set(ENDPOINT_DEFAULT_URLS.get(label,
+                                                       "http://localhost:8000"))
             self.ent_api_key.configure(state="normal")
         else:
             self.var_url.set("http://localhost:11434")
@@ -785,7 +841,7 @@ class App:
 
         def _worker() -> None:
             try:
-                if et == "vllm":
+                if endpoint_protocol(et) == "openai":
                     models = list_models_vllm(host, port, https, skip,
                                               api_key,
                                               timeout=CONNECT_TIMEOUT)
@@ -875,7 +931,11 @@ class App:
         try:
             with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
                 settings = json.load(f)
-            self.var_type.set(settings.get("endpoint_type", "ollama"))
+            stored = settings.get("endpoint_type", "Ollama")
+            stored = _LEGACY_TYPE_MAP.get(stored, stored)
+            if stored not in {label for label, _ in ENDPOINT_TYPES}:
+                stored = "Ollama"
+            self.var_type.set(stored)
             self.var_url.set(settings.get("endpoint_url", ""))
             self.var_model.set(settings.get("model", ""))
             ctx = int(settings.get("context_size", DEFAULT_CONTEXT_SIZE))
@@ -885,8 +945,8 @@ class App:
             self.chk_ssl.set(settings.get("skip_ssl", False))
             self.var_api_key.set(settings.get("api_key", ""))
             self.ent_api_key.configure(
-                state="normal" if self.var_type.get() == "vllm"
-                else "disabled")
+                state="normal" if endpoint_protocol(self.var_type.get())
+                == "openai" else "disabled")
             self._reset_connection()
             self.var_status.set("Settings loaded – press Connect")
         except (json.JSONDecodeError, OSError) as e:

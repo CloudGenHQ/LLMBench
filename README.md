@@ -6,14 +6,14 @@
 
 > **Benchmark your local LLM endpoints — fast, pretty, and dependency-free.**
 
-LLMBench is a cross-platform **GUI tool** for measuring the performance of LLM inference servers such as **[vLLM](https://github.com/vllm-project/vllm)** (OpenAI-compatible) and **[Ollama](https://ollama.com)**. Point it at an endpoint, pick a model, hit **Run Benchmark**, and get a full statistical report in seconds.
+LLMBench is a cross-platform **GUI tool** for measuring the performance of LLM inference servers such as **[Ollama](https://ollama.com)** and OpenAI-compatible servers (**[vLLM](https://github.com/vllm-project/vllm)**, **SGLang**, **llama.cpp**, **LM Studio**, **LocalAI**, **TensorRT-LLM**). Point it at an endpoint, pick a model, hit **Run Benchmark**, and get a full statistical report in seconds.
 
 | | |
 |---|---|
 | 🐍 **Runtime** | Python 3.8+ |
 | 📦 **Dependencies** | *None* — pure standard library |
 | 🖥️ **Platforms** | Windows · Linux (any OS with Tkinter) |
-| ⚡ **Endpoints** | vLLM (`/v1/chat/completions`) · Ollama (`/api/chat`) |
+| ⚡ **Endpoints** | Ollama (`/api/generate`) · vLLM / SGLang / llama.cpp / LM Studio / LocalAI / TensorRT-LLM (`/v1/chat/completions`) |
 
 ---
 
@@ -61,7 +61,7 @@ python3 llm_benchmark.py
 
 ## 🖱️ How to Use
 
-1. **Choose the endpoint type** — `Ollama` (default `http://localhost:11434`) or `vLLM` (default `http://localhost:8000`).
+1. **Choose the endpoint type** from the dropdown — `Ollama`, `vLLM`, `SGLang`, `llama.cpp`, `LM Studio`, `LocalAI`, or `TensorRT-LLM`. Selecting a type fills in its default URL (e.g. `http://localhost:11434` for Ollama, `http://localhost:8000` for vLLM) and enables the API-key field for OpenAI-compatible servers.
 2. **Enter the URL** — scheme, host, and port. A missing `http://` is added for you.
 3. **Pick a model** — the dropdown auto-populates from the endpoint's model list.
 4. *(Optional)* **Skip SSL verification** for self-signed certificates.
@@ -80,7 +80,7 @@ Every run starts with a **warm-up** request (to prime caches and JIT paths), the
 | 2 | **Latency** | End-to-end generation time | 5 runs · haiku prompt · 64 max tokens |
 | 3 | **Throughput** | Token throughput (tok/s) | 5 runs · long-form prompt · 256 max tokens |
 | 4 | **Concurrency** | Wall time per parallelism level | 1 / 2 / 4 / 8 simultaneous requests |
-| 5 | **Context Scaling** | TTFT & total latency vs. context size | 128 / 512 / 2048 / 8192-token prompts |
+| 5 | **Context Scaling** | TTFT, total latency & throughput (tok/s) vs. context size | 128 / 512 / 2048 / 8192-token prompts |
 | 6 | **Consistency** | Determinism of repeated answers | 10 runs · same prompt · unique-response count |
 
 ### Statistics per metric
@@ -109,7 +109,7 @@ Throughput,Token Throughput,tok/s,42.1000,41.8000,39.5000,44.2000,1.4500,44.2000
 
 ```json
 {
-  "endpoint_type": "ollama",
+  "endpoint_type": "Ollama",
   "endpoint_url": "http://localhost:11434",
   "model": "llama3.1:8b",
   "timestamp": "2026-10-28T14:32:05.123456",

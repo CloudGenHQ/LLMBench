@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # ──────────────────────────────────────────────
 #  LLM Benchmark Tool – Linux launcher
-#  Detects a missing Python 3.8+, offers to install
-#  it via the system package manager, then runs the tool.
+#  Detects a missing Python 3.8+ (and the Tkinter GUI
+#  library, a separate package on Debian/Ubuntu), offers
+#  to install them via the system package manager, then runs.
 # ──────────────────────────────────────────────
 set -euo pipefail
 
@@ -102,11 +103,72 @@ install_python() {
     esac
 }
 
+# Install the Tkinter GUI library using the detected package manager.
+# Package names differ per distro; the common ones are handled here.
+install_tkinter() {
+    local pm SUDO
+    pm="$(detect_pkg_manager)"
+    SUDO="$(sudo_cmd)"
+
+    if [ "$(id -u)" -ne 0 ] && [ -z "$SUDO" ]; then
+        err "Not running as root and 'sudo' is not available; cannot install."
+        return 1
+    fi
+
+    case "$pm" in
+        apt)
+            info "Installing python3-tk via apt..."
+            $SUDO apt-get update || return 1
+            $SUDO apt-get install -y python3-tk || return 1
+            ;;
+        dnf)
+            info "Installing python3-tkinter via dnf..."
+            $SUDO dnf install -y python3-tkinter || return 1
+            ;;
+        yum)
+            info "Installing python3-tkinter via yum..."
+            $SUDO yum install -y python3-tkinter || return 1
+            ;;
+        pacman)
+            info "Installing tk via pacman..."
+            $SUDO pacman -S --noconfirm tk || return 1
+            ;;
+        zypper)
+            info "Installing python3-tk via zypper..."
+            $SUDO zypper --non-interactive install python3-tk || return 1
+            ;;
+        apk)
+            info "Installing python3-tk via apk..."
+            $SUDO apk add python3-tk || return 1
+            ;;
+        xbps)
+            info "Installing python-tk via xbps..."
+            $SUDO xbps-install -Sy python-tk || return 1
+            ;;
+        pkg)
+            info "Installing python-tk via pkg..."
+            $SUDO pkg install -y python-tk || return 1
+            ;;
+        *)
+            err "No supported package manager found (apt/dnf/yum/pacman/zypper/apk/xbps/pkg)."
+            err "Please install the Tkinter library manually, then re-run this script."
+            return 1
+            ;;
+    esac
+}
+
 # True if $1 is a Python interpreter that is 3.8 or newer.
 python_ok() {
     local py="$1"
     command -v "$py" &>/dev/null || return 1
     "$py" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 8) else 1)' &>/dev/null
+}
+
+# True if $1 is a Python interpreter that has the tkinter module.
+tk_ok() {
+    local py="$1"
+    command -v "$py" &>/dev/null || return 1
+    "$py" -c 'import tkinter' &>/dev/null
 }
 
 # ── main ──────────────────────────────────────
@@ -136,6 +198,22 @@ if ! python_ok "$PYTHON"; then
         fi
     else
         err "Aborting. Install Python 3.8+ and re-run, or set PYTHON=/path/to/python."
+        exit 1
+    fi
+fi
+
+# ── ensure the Tkinter GUI library is available ──
+if ! tk_ok "$PYTHON"; then
+    warn "'$PYTHON' is present but the Tkinter GUI library is missing."
+    info "On Debian/Ubuntu it ships as a separate package (python3-tk)."
+    if ask_yes_no "Would you like to install Tkinter now? [y/N]"; then
+        if install_tkinter; then
+            info "Tkinter is ready."
+        else
+            exit 1
+        fi
+    else
+        err "Aborting. Install Tkinter (e.g. 'sudo apt-get install -y python3-tk') and re-run."
         exit 1
     fi
 fi

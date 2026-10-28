@@ -20,8 +20,9 @@ Features
     6. Consistency / variance  (10 repeated runs)
 * Live results table in the GUI
 * One-click export to CSV or JSON
-* Persistent run log – every run is appended to ``llm_bench_runs.log``
-  with all chosen settings (the file is kept across app launches)
+* Persistent run log – every run is appended to ``logs/llm_bench_runs.log``
+  with all chosen settings, and a per-run HTML report is saved to
+  ``logs/reports/`` (both are kept across app launches)
 
 Usage
 -----
@@ -35,6 +36,7 @@ Python 3.8+  (standard library only – no pip installs needed)
 from __future__ import annotations
 
 import csv
+import html
 import http.client
 import json
 import os
@@ -43,6 +45,7 @@ import statistics
 import threading
 import time
 import tkinter as tk
+import webbrowser
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
@@ -53,6 +56,8 @@ from urllib.parse import urlparse
 # ══════════════════════════════════════════════
 #  CONSTANTS
 # ══════════════════════════════════════════════
+
+__version__ = "1.0.0"  # application version (shown in the GUI title, reports, and logs)
 
 TIMEOUT = 120  # seconds per HTTP request
 CONNECT_TIMEOUT = 10  # seconds for connection checks / model discovery
@@ -195,6 +200,7 @@ class BenchmarkReport:
             "model": self.model,
             "timestamp": self.timestamp,
             "context_size": self.context_size,
+            "tool_version": __version__,
             "results": [asdict(r) for r in self.results],
         }
 
@@ -217,29 +223,92 @@ class BenchmarkReport:
 #  RUN  LOG
 # ══════════════════════════════════════════════
 #
-#  Every benchmark run is appended to a single persistent log file
-#  (created next to the app, or in the user's home directory if that
-#  location is not writable).  The file is kept across app launches,
-#  so the user can find all of their runs in one place.
+#  All run artifacts live in a single, well-structured ``logs`` folder:
+#
+#      logs/
+#      ├── llm_bench_runs.log          # text log – one entry per run
+#      └── reports/
+#          └── llm_bench_report_*.html # one self-contained HTML per run
+#
+#  The folder is created next to the app, or under the user's home
+#  directory if that location is not writable.  It is kept across app
+#  launches, so the user can find all of their runs in one place.
 
-def _resolve_log_file() -> str:
-    """Find a writable location for the run log (next to the app, else home)."""
+def _resolve_logs_dir() -> str:
+    """Find a writable logs directory (next to the app, else a home fallback).
+
+    Creates the directory (and its ``reports`` subfolder) if needed and
+    returns the first candidate that is actually writable.
+    """
+    app_dir = os.path.dirname(os.path.abspath(__file__))
     candidates = [
-        os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                     "llm_bench_runs.log"),
-        os.path.join(os.path.expanduser("~"), "llm_bench_runs.log"),
+        os.path.join(app_dir, "logs"),
+        os.path.join(os.path.expanduser("~"), "llm_bench", "logs"),
     ]
     for path in candidates:
         try:
-            with open(path, "a", encoding="utf-8"):
+            os.makedirs(path, exist_ok=True)
+            # Verify it is writable by creating and removing a probe file.
+            probe = os.path.join(path, ".write_test")
+            with open(probe, "w", encoding="utf-8"):
                 pass
+            os.remove(probe)
             return path
         except OSError:
             continue
     return candidates[-1]
 
 
-LOG_FILE = _resolve_log_file()
+def _migrate_legacy_artifacts() -> None:
+    """One-time migration: fold legacy app-dir artifacts into the logs/ folder.
+
+    Older versions wrote the run log and per-run HTML reports directly next
+    to the app.  If any of those files still exist, move them into the
+    well-structured logs folder so all run history lives in one place.
+    """
+    app_dir = os.path.dirname(os.path.abspath(__file__))
+
+    # 1) Legacy run log -> logs/llm_bench_runs.log
+    legacy_log = os.path.join(app_dir, "llm_bench_runs.log")
+    if os.path.isfile(legacy_log):
+        try:
+            if os.path.exists(LOG_FILE):
+                with open(legacy_log, "r", encoding="utf-8") as src, \
+                        open(LOG_FILE, "a", encoding="utf-8") as dst:
+                    dst.write(src.read())
+                os.remove(legacy_log)
+            else:
+                os.replace(legacy_log, LOG_FILE)
+        except OSError:
+            pass  # best effort – leave the legacy file in place
+
+    # 2) Legacy HTML reports -> logs/reports/
+    try:
+        os.makedirs(REPORTS_DIR, exist_ok=True)
+    except OSError:
+        return
+    for name in os.listdir(app_dir):
+        if not (name.startswith("llm_bench_report_")
+                and name.endswith(".html")):
+            continue
+        src = os.path.join(app_dir, name)
+        if not os.path.isfile(src):
+            continue
+        dst = os.path.join(REPORTS_DIR, name)
+        counter = 1
+        while os.path.exists(dst):
+            dst = os.path.join(REPORTS_DIR, f"{name[:-5]}_{counter}.html")
+            counter += 1
+        try:
+            os.replace(src, dst)
+        except OSError:
+            pass  # best effort – leave the legacy file in place
+
+
+LOGS_DIR = _resolve_logs_dir()
+LOG_FILE = os.path.join(LOGS_DIR, "llm_bench_runs.log")
+REPORTS_DIR = os.path.join(LOGS_DIR, "reports")
+_migrate_legacy_artifacts()
 
 
 def _mask_key(key: str) -> str:
@@ -254,7 +323,8 @@ def _log_session_start() -> None:
     try:
         with open(LOG_FILE, "a", encoding="utf-8") as f:
             f.write(f"\n--- session started "
-                    f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ---\n")
+                    f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} "
+                    f"(LLMBench v{__version__}) ---\n")
     except OSError:
         pass
 
@@ -267,8 +337,12 @@ def _write_log(lines: List[str]) -> None:
         print(f"Could not write run log {LOG_FILE}: {e}")
 
 
-def _log_run(report: BenchmarkReport, settings: Dict[str, str]) -> None:
-    """Append one completed benchmark run (settings + results) to the log."""
+def _log_run(report: BenchmarkReport, settings: Dict[str, str]) -> Optional[str]:
+    """Append one completed benchmark run (settings + results) to the log.
+
+    Also writes a self-contained HTML report for the run and returns its
+    file path (or ``None`` if the HTML could not be written).
+    """
     lines = ["=" * 78,
              f"RUN {report.timestamp}",
              "-" * 78]
@@ -282,6 +356,7 @@ def _log_run(report: BenchmarkReport, settings: Dict[str, str]) -> None:
                      f"{r.max:8.4f} {r.stdev:8.4f} {r.p95:8.4f}")
     lines += ["=" * 78, ""]
     _write_log(lines)
+    return _log_run_html(report, settings)
 
 
 def _log_run_failed(settings: Dict[str, str], error: str) -> None:
@@ -294,6 +369,268 @@ def _log_run_failed(settings: Dict[str, str], error: str) -> None:
     lines.append(f"  Error: {error}")
     lines += ["=" * 78, ""]
     _write_log(lines)
+
+
+# ══════════════════════════════════════════════
+#  HTML  REPORT
+# ══════════════════════════════════════════════
+
+#: Inline CSS for the generated HTML report. Kept as a plain (non-f) string
+#: so the ``{`` / ``}`` braces do not need escaping.
+_HTML_CSS = """
+:root { color-scheme: light; }
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  background: #f4f6fa;
+  color: #2b3242;
+  line-height: 1.5;
+}
+.wrap { max-width: 1000px; margin: 0 auto; padding: 28px 20px 60px; }
+header.hero {
+  background: linear-gradient(135deg, #3b5bdb 0%, #4f8ef7 100%);
+  color: #fff;
+  border-radius: 14px;
+  padding: 26px 28px;
+  box-shadow: 0 8px 24px rgba(59, 91, 219, .25);
+}
+header.hero h1 { margin: 0 0 6px; font-size: 24px; font-weight: 700; }
+header.hero .sub { opacity: .92; font-size: 15px; }
+header.hero .meta { margin-top: 14px; display: flex; flex-wrap: wrap; gap: 8px 22px; font-size: 13px; }
+header.hero .meta b { font-weight: 600; opacity: .85; }
+h2 { font-size: 18px; margin: 34px 0 14px; color: #2b3242; }
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 14px; }
+.card {
+  background: #fff; border-radius: 12px; padding: 16px 18px;
+  box-shadow: 0 2px 8px rgba(20, 30, 60, .06);
+}
+.card-title { font-size: 12px; color: #8a93a3; text-transform: uppercase; letter-spacing: .04em; }
+.card-value { font-size: 28px; font-weight: 700; margin-top: 6px; color: #2b3242; }
+.card-unit { font-size: 12px; color: #8a93a3; margin-top: 2px; }
+.charts { display: grid; grid-template-columns: 1fr; gap: 16px; }
+.chart-card {
+  background: #fff; border-radius: 12px; padding: 18px 20px;
+  box-shadow: 0 2px 8px rgba(20, 30, 60, .06);
+}
+.chart-card h3 { margin: 0 0 10px; font-size: 15px; color: #2b3242; }
+.chart-unit { color: #8a93a3; font-weight: 400; font-size: 13px; }
+table {
+  width: 100%; border-collapse: collapse; background: #fff;
+  border-radius: 12px; overflow: hidden;
+  box-shadow: 0 2px 8px rgba(20, 30, 60, .06);
+}
+th, td { padding: 10px 14px; text-align: left; font-size: 13px; border-bottom: 1px solid #eef1f6; }
+thead th {
+  background: #f0f3f9; color: #5a6478; font-weight: 600;
+  text-transform: uppercase; font-size: 11px; letter-spacing: .04em;
+}
+tbody tr:last-child td { border-bottom: none; }
+tbody tr:hover { background: #f7f9fc; }
+td.num { text-align: right; font-variant-numeric: tabular-nums; }
+td.t { font-weight: 500; }
+.settings td:first-child { width: 180px; color: #8a93a3; }
+footer { margin-top: 36px; text-align: center; color: #a0a8b8; font-size: 12px; }
+"""
+
+
+def _svg_bar_chart(items: List[Tuple[str, float]], color: str,
+                   width: int = 760, height: int = 260) -> str:
+    """Render a dependency-free SVG bar chart from ``(label, value)`` pairs."""
+    if not items:
+        return ""
+    left, right, top, bottom = 52, 16, 28, 74
+    plot_w = width - left - right
+    plot_h = height - top - bottom
+    max_val = max(v for _, v in items) or 1.0
+    n = len(items)
+    slot = plot_w / n
+    bar_w = slot * 0.6
+
+    parts = [f'<svg viewBox="0 0 {width} {height}" '
+             f'xmlns="http://www.w3.org/2000/svg" '
+             f'role="img" style="width:100%;height:auto;">']
+    # horizontal gridlines + y-axis value labels
+    for frac in (0.0, 0.25, 0.5, 0.75, 1.0):
+        y = top + plot_h - frac * plot_h
+        parts.append(
+            f'<line x1="{left}" y1="{y:.1f}" x2="{width - right}" y2="{y:.1f}" '
+            f'stroke="#e6e9ef" stroke-width="1"/>')
+        parts.append(
+            f'<text x="{left - 8}" y="{y + 4:.1f}" text-anchor="end" '
+            f'font-size="11" fill="#8a93a3">{max_val * frac:.0f}</text>')
+    # bars, value labels and (rotated) x-axis labels
+    for i, (label, value) in enumerate(items):
+        x = left + i * slot + (slot - bar_w) / 2
+        bar_h = (value / max_val) * plot_h
+        y = top + plot_h - bar_h
+        parts.append(
+            f'<rect x="{x:.1f}" y="{y:.1f}" width="{bar_w:.1f}" '
+            f'height="{bar_h:.1f}" rx="3" fill="{color}"/>')
+        parts.append(
+            f'<text x="{x + bar_w / 2:.1f}" y="{y - 6:.1f}" '
+            f'text-anchor="middle" font-size="11" font-weight="600" '
+            f'fill="#3a4256">{value:.1f}</text>')
+        cx = x + bar_w / 2
+        cy = top + plot_h + 14
+        parts.append(
+            f'<text x="{cx:.1f}" y="{cy:.1f}" text-anchor="end" '
+            f'font-size="11" fill="#5a6478" '
+            f'transform="rotate(-32 {cx:.1f} {cy:.1f})">{html.escape(label)}</text>')
+    # baseline
+    parts.append(
+        f'<line x1="{left}" y1="{top + plot_h}" x2="{width - right}" '
+        f'y2="{top + plot_h}" stroke="#c9cfda" stroke-width="1.5"/>')
+    parts.append("</svg>")
+    return "".join(parts)
+
+
+def _generate_html_report(report: BenchmarkReport,
+                          settings: Dict[str, str]) -> str:
+    """Build a self-contained HTML report (inline CSS + SVG charts)."""
+    esc = html.escape
+
+    # group results by unit so each chart stays on a single scale
+    groups: Dict[str, List[TestResult]] = {}
+    for r in report.results:
+        groups.setdefault(r.unit, []).append(r)
+
+    def _mean_of(unit: str) -> Optional[float]:
+        vals = [r.mean for r in groups.get(unit, [])]
+        return statistics.mean(vals) if vals else None
+
+    def _find(sub: str) -> Optional[TestResult]:
+        for r in report.results:
+            if sub.lower() in r.metric.lower():
+                return r
+        return None
+
+    # ── summary cards ─────────────────────────────────────────────
+    def _card(title: str, value: Optional[float], unit: str, accent: str) -> str:
+        if value is None:
+            return ""
+        return (f'<div class="card" style="border-top:3px solid {accent};">'
+                f'<div class="card-title">{esc(title)}</div>'
+                f'<div class="card-value">{value:.2f}</div>'
+                f'<div class="card-unit">{esc(unit)}</div></div>')
+
+    ttft = _find("TTFT")
+    tpot = _find("TPOT")
+    e2e = _find("E2E")
+    cards_html = "".join(c for c in (
+        _card("Throughput", _mean_of("tok/s"), "tokens/sec", "#4f8ef7"),
+        _card("Time to First Token", ttft.mean if ttft else None, "ms", "#f7a14f"),
+        _card("Time per Output Token", tpot.mean if tpot else None, "ms", "#f7a14f"),
+        _card("E2E Latency", e2e.mean if e2e else None, "ms", "#f7a14f"),
+        _card("Consistency", _mean_of("%"), "%", "#5fd08a"),
+    ) if c)
+
+    # ── charts ────────────────────────────────────────────────────
+    chart_defs = [
+        ("tok/s", "Throughput by test", "tokens/sec", "#4f8ef7"),
+        ("ms", "Latency by test", "ms", "#f7a14f"),
+        ("%", "Consistency by test", "%", "#5fd08a"),
+    ]
+    charts_html = ""
+    for unit, title, u, color in chart_defs:
+        if unit in groups:
+            items = [(r.name, r.mean) for r in groups[unit]]
+            charts_html += (
+                f'<div class="chart-card">'
+                f'<h3>{esc(title)} <span class="chart-unit">({esc(u)})</span></h3>'
+                f'{_svg_bar_chart(items, color)}</div>')
+
+    # ── settings table ────────────────────────────────────────────
+    settings_rows = "".join(
+        f'<tr><td class="t">{esc(k)}</td><td>{esc(str(v))}</td></tr>'
+        for k, v in settings.items())
+
+    # ── full results table ────────────────────────────────────────
+    rows = ""
+    for r in report.results:
+        rows += (
+            f'<tr><td class="t">{esc(r.name)}</td>'
+            f'<td class="t">{esc(r.metric)}</td>'
+            f'<td>{esc(r.unit)}</td>'
+            f'<td class="num">{r.mean:.3f}</td>'
+            f'<td class="num">{r.median:.3f}</td>'
+            f'<td class="num">{r.min:.3f}</td>'
+            f'<td class="num">{r.max:.3f}</td>'
+            f'<td class="num">{r.stdev:.3f}</td>'
+            f'<td class="num">{r.p95:.3f}</td></tr>')
+
+    body = f"""
+<header class="hero">
+  <h1>LLM Benchmark Report</h1>
+  <div class="sub">{esc(report.model)}</div>
+  <div class="meta">
+    <span><b>Endpoint:</b> {esc(report.endpoint_type)} &mdash; {esc(report.endpoint_url)}</span>
+    <span><b>Context:</b> {report.context_size} tokens</span>
+    <span><b>Run:</b> {esc(report.timestamp)}</span>
+    <span><b>Tool:</b> LLMBench v{__version__}</span>
+  </div>
+</header>
+
+<h2>Summary</h2>
+<div class="cards">{cards_html}</div>
+
+<h2>Charts</h2>
+<div class="charts">{charts_html}</div>
+
+<h2>Settings</h2>
+<table class="settings"><tbody>{settings_rows}</tbody></table>
+
+<h2>All Results</h2>
+<table>
+  <thead><tr>
+    <th>Test</th><th>Metric</th><th>Unit</th>
+    <th>Mean</th><th>Median</th><th>Min</th><th>Max</th><th>StDev</th><th>P95</th>
+  </tr></thead>
+  <tbody>{rows}</tbody>
+</table>
+
+<footer>Generated by LLMBench v{__version__} on {esc(report.timestamp)}</footer>
+"""
+
+    return (
+        "<!DOCTYPE html>\n"
+        '<html lang="en">\n'
+        "<head>\n"
+        '<meta charset="utf-8">\n'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
+        f"<title>{esc('LLM Benchmark — ' + report.model)}</title>\n"
+        f"<style>{_HTML_CSS}</style>\n"
+        "</head>\n"
+        '<body>\n'
+        f'<div class="wrap">{body}</div>\n'
+        "</body>\n"
+        "</html>"
+    )
+
+
+def _log_run_html(report: BenchmarkReport,
+                  settings: Dict[str, str]) -> Optional[str]:
+    """Write a self-contained HTML report for one run; return its path.
+
+    Reports are stored in ``logs/reports/``.  The filename is timestamped
+    and, if that exact name already exists (two runs in the same second),
+    a numeric suffix is appended so no report is ever overwritten.
+    """
+    try:
+        os.makedirs(REPORTS_DIR, exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        path = os.path.join(REPORTS_DIR, f"llm_bench_report_{stamp}.html")
+        counter = 1
+        while os.path.exists(path):
+            path = os.path.join(REPORTS_DIR,
+                                f"llm_bench_report_{stamp}_{counter}.html")
+            counter += 1
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(_generate_html_report(report, settings))
+        return path
+    except OSError as e:
+        print(f"Could not write HTML report: {e}")
+        return None
 
 
 # ══════════════════════════════════════════════
@@ -672,7 +1009,7 @@ class App:
 
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
-        root.title("LLM Benchmark Tool")
+        root.title(f"LLM Benchmark Tool v{__version__}")
         root.geometry("900x680")
         root.minsize(700, 520)
 
@@ -780,6 +1117,10 @@ class App:
                    command=self._export_csv).pack(side="left", padx=4)
         ttk.Button(btns, text="Export JSON",
                    command=self._export_json).pack(side="left")
+        ttk.Button(btns, text="Open Report",
+                   command=self._open_report).pack(side="left", padx=4)
+        ttk.Button(btns, text="Export HTML",
+                   command=self._export_html).pack(side="left")
         ttk.Separator(btns, orient="vertical").pack(side="left", fill="y", padx=8)
         ttk.Button(btns, text="Save Settings",
                    command=self._save_settings).pack(side="left")
@@ -788,6 +1129,7 @@ class App:
         ttk.Label(btns, text=f"Runs are logged to {LOG_FILE}",
                   foreground="gray").pack(side="right", padx=4)
         self._last_report: Optional[BenchmarkReport] = None
+        self._last_report_path: Optional[str] = None
         self._connected = False
         self._connecting = False
         # Editing the URL invalidates any previous connection.
@@ -898,13 +1240,24 @@ class App:
                                          api_key=api_key,
                                          context_size=self._context_size())
                 report = engine.run_all()
-                _log_run(report, settings)
-                self.queue.put(("done", report))
+                html_path = _log_run(report, settings)
+                self.queue.put(("done", report, html_path))
             except Exception as e:
                 _log_run_failed(settings, str(e))
                 self.queue.put(("error", str(e)))
 
         threading.Thread(target=_worker, daemon=True).start()
+
+    def _current_settings(self) -> Dict[str, str]:
+        """Snapshot the current endpoint settings as a dict (for reports)."""
+        return {
+            "Endpoint Type": self.var_type.get(),
+            "Endpoint URL": self.var_url.get().strip(),
+            "Model": self.var_model.get().strip(),
+            "Context Size": str(self._context_size()),
+            "Skip SSL": str(self.chk_ssl.get()),
+            "API Key": self.var_api_key.get().strip() or "(none)",
+        }
 
     def _save_settings(self) -> None:
         """Persist current endpoint settings to a JSON file."""
@@ -963,8 +1316,13 @@ class App:
                     self.progress["value"] = cur
                 elif item[0] == "done":
                     self._last_report = item[1]
+                    self._last_report_path = item[2] if len(item) > 2 else None
                     self._populate_results(self._last_report)
-                    self.var_status.set("Benchmark complete")
+                    if self._last_report_path:
+                        self.var_status.set(
+                            f"Benchmark complete – report: {self._last_report_path}")
+                    else:
+                        self.var_status.set("Benchmark complete")
                     self.progress["value"] = self.progress["maximum"]
                 elif item[0] == "connected":
                     models, target = item[1], item[2]
@@ -1031,6 +1389,32 @@ class App:
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(self._last_report.to_dict(), f, indent=2)
             self.var_status.set(f"Exported to {path}")
+
+    def _open_report(self) -> None:
+        """Open the most recent HTML report in the default browser."""
+        if not self._last_report_path or not os.path.isfile(self._last_report_path):
+            messagebox.showinfo("Info", "No HTML report available yet.\n"
+                                        "Run a benchmark first.")
+            return
+        webbrowser.open("file://" + os.path.abspath(self._last_report_path))
+
+    def _export_html(self) -> None:
+        """Save the most recent HTML report to a user-chosen location."""
+        if not self._last_report:
+            messagebox.showinfo("Info", "No results to export.")
+            return
+        path = filedialog.asksaveasfilename(
+            defaultextension=".html",
+            filetypes=[("HTML files", "*.html")],
+            initialname=f"benchmark_{self._last_report.model}.html")
+        if path:
+            try:
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(_generate_html_report(self._last_report,
+                                                  self._current_settings()))
+                self.var_status.set(f"Exported to {path}")
+            except OSError as e:
+                messagebox.showerror("Export Error", str(e))
 
 
 # ══════════════════════════════════════════════

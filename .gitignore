@@ -1,3 +1,4 @@
 __pycache__/
+logs/
 llm_bench_runs.log
 llm_benchmark_settings.json

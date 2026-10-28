@@ -10,6 +10,7 @@ LLMBench is a cross-platform **GUI tool** for measuring the performance of LLM i
 
 | | |
 |---|---|
+| 🏷️ **Version** | 1.0.0 |
 | 🐍 **Runtime** | Python 3.8+ |
 | 📦 **Dependencies** | *None* — pure standard library |
 | 🖥️ **Platforms** | Windows · Linux (any OS with Tkinter) |
@@ -55,7 +56,7 @@ You can also run the script directly:
 python3 llm_benchmark.py
 ```
 
-> The launcher scripts check that a suitable Python interpreter is on your `PATH` (override with the `PYTHON` environment variable) and exit with a clear error if not.
+> The launcher scripts check that a suitable Python 3.8+ interpreter is on your `PATH` (override with the `PYTHON` environment variable). The Linux launcher offers to install it via your system package manager if it's missing; the Windows launcher exits with a clear error if not.
 
 ---
 
@@ -113,6 +114,7 @@ Throughput,Token Throughput,tok/s,42.1000,41.8000,39.5000,44.2000,1.4500,44.2000
   "endpoint_url": "http://localhost:11434",
   "model": "llama3.1:8b",
   "timestamp": "2026-10-28T14:32:05.123456",
+  "tool_version": "1.0.0",
   "results": [
     {
       "name": "TTFT",
@@ -134,6 +136,10 @@ Throughput,Token Throughput,tok/s,42.1000,41.8000,39.5000,44.2000,1.4500,44.2000
 
 **Save Settings** writes `llm_benchmark_settings.json` next to the script (endpoint type, URL, model, SSL flag); **Load Settings** restores it and re-fetches the model list.
 
+### Run log & HTML reports
+
+Every run is appended to `logs/llm_bench_runs.log` (with all chosen settings), and a self-contained HTML report is saved to `logs/reports/` — one file per run, timestamped so nothing is ever overwritten. The `logs/` folder is created automatically next to the script (or in your home directory if that location isn't writable) and is kept across launches.
+
 ---
 
 ## 🗂️ Project Structure
@@ -147,6 +153,9 @@ LLMBench/
 │   └── images/
 │       ├── llmbench.png           # GUI screenshot (used in this README)
 │       └── llmbench.jpg
+├── logs/                          # Created automatically at runtime
+│   ├── llm_bench_runs.log         # Text log — one entry per run
+│   └── reports/                   # One self-contained HTML report per run
 └── README.md
 ```
 
@@ -160,7 +169,7 @@ Everything lives in one file: HTTP/streaming helpers, the benchmark engine, and 
 |---------|-----|
 | `Model refresh failed` | Make sure the server is running and the URL/port are correct. |
 | SSL errors on HTTPS endpoints | Tick **Skip SSL verification** (self-signed certs). |
-| `Error: 'python3' not found` (Linux) | Install Python 3.8+, or set `PYTHON=/path/to/python`. |
+| Python 3.8+ not found (Linux) | The launcher offers to install it via your package manager (apt/dnf/yum/pacman/zypper/apk/xbps/pkg). Decline and install manually, or set `PYTHON=/path/to/python`. |
 | GUI doesn't appear (headless Linux) | Tkinter requires an X/Wayland display; run on a desktop session or over X11 forwarding. |
 | Timeouts on large models | Each request has a 120 s timeout — very slow first-token times on small hardware may exceed it. |
 
